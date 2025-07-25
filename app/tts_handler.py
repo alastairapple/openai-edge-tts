@@ -5,13 +5,39 @@ import asyncio
 import tempfile
 import subprocess
 import os
+import wave
+import base64
 from pathlib import Path
 
 from utils import DETAILED_ERROR_LOGGING
 from config import DEFAULT_CONFIGS
 
+# Backend configuration
+DEFAULT_BACKEND = os.getenv('DEFAULT_BACKEND', DEFAULT_CONFIGS["DEFAULT_BACKEND"])
+AZURE_SPEECH_KEY = os.getenv('AZURE_SPEECH_KEY', DEFAULT_CONFIGS["AZURE_SPEECH_KEY"])
+AZURE_SPEECH_REGION = os.getenv('AZURE_SPEECH_REGION', DEFAULT_CONFIGS["AZURE_SPEECH_REGION"])
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', DEFAULT_CONFIGS["GEMINI_API_KEY"])
+
 # Language default (environment variable)
 DEFAULT_LANGUAGE = os.getenv('DEFAULT_LANGUAGE', DEFAULT_CONFIGS["DEFAULT_LANGUAGE"])
+
+# Import backend-specific libraries conditionally
+try:
+    import azure.cognitiveservices.speech as speechsdk
+    AZURE_AVAILABLE = True
+except ImportError:
+    AZURE_AVAILABLE = False
+    if DETAILED_ERROR_LOGGING:
+        print("Azure Speech SDK not available. Install with: pip install azure-cognitiveservices-speech")
+
+try:
+    from google import genai
+    from google.genai import types
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    if DETAILED_ERROR_LOGGING:
+        print("Google GenAI not available. Install with: pip install google-genai")
 
 # OpenAI voice names mapped to edge-tts equivalents
 voice_mapping = {
@@ -28,6 +54,36 @@ voice_mapping = {
     'verse': 'en-US-BrianNeural',
 }
 
+# Azure voice mapping (OpenAI -> Azure voice names)
+azure_voice_mapping = {
+    'alloy': 'en-US-JennyNeural',
+    'ash': 'en-US-AndrewNeural', 
+    'ballad': 'en-GB-ThomasNeural',
+    'coral': 'en-AU-NatashaNeural',
+    'echo': 'en-US-GuyNeural',
+    'fable': 'en-GB-SoniaNeural',
+    'nova': 'en-US-AriaNeural',
+    'onyx': 'en-US-EricNeural',
+    'sage': 'en-US-JennyNeural',
+    'shimmer': 'en-US-EmmaNeural',
+    'verse': 'en-US-BrianNeural',
+}
+
+# Gemini voice mapping (OpenAI -> Gemini voice names)
+gemini_voice_mapping = {
+    'alloy': 'Kore',
+    'ash': 'Charon',
+    'ballad': 'Aoede',
+    'coral': 'Fenrir',
+    'echo': 'Kore',
+    'fable': 'Aoede', 
+    'nova': 'Kore',
+    'onyx': 'Charon',
+    'sage': 'Aoede',
+    'shimmer': 'Kore',
+    'verse': 'Charon',
+}
+
 model_data = [
         {"id": "tts-1", "name": "Text-to-speech v1"},
         {"id": "tts-1-hd", "name": "Text-to-speech v1 HD"},
@@ -42,7 +98,16 @@ def is_ffmpeg_installed():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-async def _generate_audio_stream(text, voice, speed):
+def write_wave_file(filename, pcm_data, channels=1, rate=24000, sample_width=2):
+    """Write PCM data to a WAV file."""
+    with wave.open(filename, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(rate)
+        wf.writeframes(pcm_data)
+
+# Backend-specific generation functions
+async def _generate_audio_stream_edgetts(text, voice, speed):
     """Generate streaming TTS audio using edge-tts."""
     # Determine if the voice is an OpenAI-compatible voice or a direct edge-tts voice
     edge_tts_voice = voice_mapping.get(voice, voice)  # Use mapping if in OpenAI names, otherwise use as-is
@@ -62,12 +127,8 @@ async def _generate_audio_stream(text, voice, speed):
         if chunk["type"] == "audio":
             yield chunk["data"]
 
-def generate_speech_stream(text, voice, speed=1.0):
-    """Generate streaming speech audio (synchronous wrapper)."""
-    return asyncio.run(_generate_audio_stream(text, voice, speed))
-
-async def _generate_audio(text, voice, response_format, speed):
-    """Generate TTS audio and optionally convert to a different format."""
+async def _generate_audio_edgetts(text, voice, response_format, speed):
+    """Generate TTS audio using edge-tts and optionally convert to a different format."""
     # Determine if the voice is an OpenAI-compatible voice or a direct edge-tts voice
     edge_tts_voice = voice_mapping.get(voice, voice)  # Use mapping if in OpenAI names, otherwise use as-is
 
@@ -151,8 +212,190 @@ async def _generate_audio(text, voice, response_format, speed):
 
     return converted_path
 
-def generate_speech(text, voice, response_format, speed=1.0):
-    return asyncio.run(_generate_audio(text, voice, response_format, speed))
+async def _generate_audio_azuretts(text, voice, response_format, speed):
+    """Generate TTS audio using Azure Cognitive Services Speech."""
+    if not AZURE_AVAILABLE:
+        raise RuntimeError("Azure Speech SDK not available. Install with: pip install azure-cognitiveservices-speech")
+    
+    if not AZURE_SPEECH_KEY:
+        raise RuntimeError("Azure Speech Key not configured. Set AZURE_SPEECH_KEY environment variable.")
+    
+    # Map OpenAI voice to Azure voice
+    azure_voice = azure_voice_mapping.get(voice, voice)
+    
+    # Create speech config
+    speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+    speech_config.speech_synthesis_voice_name = azure_voice
+    
+    # Adjust speech rate for speed
+    rate_percentage = int((speed - 1) * 100)
+    ssml_text = f'''<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
+        <voice name="{azure_voice}">
+            <prosody rate="{rate_percentage:+d}%">{text}</prosody>
+        </voice>
+    </speak>'''
+    
+    # Create synthesizer
+    temp_file_obj = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    temp_path = temp_file_obj.name
+    temp_file_obj.close()
+    
+    audio_config = speechsdk.audio.AudioOutputConfig(filename=temp_path)
+    synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+    
+    # Synthesize speech
+    result = synthesizer.speak_ssml_async(ssml_text).get()
+    
+    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+        # Convert to requested format if needed
+        if response_format == "wav":
+            return temp_path
+        else:
+            # Use FFmpeg to convert
+            return await _convert_audio_format(temp_path, response_format)
+    else:
+        # Clean up temp file on error
+        Path(temp_path).unlink(missing_ok=True)
+        raise RuntimeError(f"Azure TTS failed: {result.reason}")
+
+async def _generate_audio_gemini(text, voice, response_format, speed):
+    """Generate TTS audio using Google Gemini."""
+    if not GEMINI_AVAILABLE:
+        raise RuntimeError("Google GenAI not available. Install with: pip install google-genai")
+    
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Gemini API Key not configured. Set GEMINI_API_KEY environment variable.")
+    
+    # Map OpenAI voice to Gemini voice  
+    gemini_voice = gemini_voice_mapping.get(voice, 'Kore')
+    
+    # Note: Gemini doesn't support speed adjustment in the same way
+    # We'll ignore the speed parameter for now
+    if speed != 1.0 and DETAILED_ERROR_LOGGING:
+        print(f"Warning: Gemini TTS doesn't support speed adjustment. Ignoring speed={speed}")
+    
+    try:
+        # Initialize Gemini client
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # Generate audio
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-preview-tts",
+            contents=text,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=gemini_voice,
+                        )
+                    )
+                ),
+            )
+        )
+        
+        # Extract audio data
+        audio_data = response.candidates[0].content.parts[0].inline_data.data
+        
+        # Create temporary WAV file
+        temp_file_obj = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        temp_path = temp_file_obj.name
+        temp_file_obj.close()
+        
+        # Write WAV file (Gemini returns PCM data at 24kHz, 16-bit)
+        write_wave_file(temp_path, audio_data, channels=1, rate=24000, sample_width=2)
+        
+        # Convert to requested format if needed
+        if response_format == "wav":
+            return temp_path
+        else:
+            return await _convert_audio_format(temp_path, response_format)
+            
+    except Exception as e:
+        raise RuntimeError(f"Gemini TTS failed: {str(e)}")
+
+async def _convert_audio_format(input_path, target_format):
+    """Convert audio file to target format using FFmpeg."""
+    if not is_ffmpeg_installed():
+        print("FFmpeg is not available. Returning original file.")
+        return input_path
+    
+    # Create output file
+    converted_file_obj = tempfile.NamedTemporaryFile(delete=False, suffix=f".{target_format}")
+    converted_path = converted_file_obj.name
+    converted_file_obj.close()
+    
+    # Build FFmpeg command
+    ffmpeg_command = [
+        "ffmpeg",
+        "-i", input_path,
+        "-c:a", {
+            "aac": "aac",
+            "mp3": "libmp3lame", 
+            "wav": "pcm_s16le",
+            "opus": "libopus",
+            "flac": "flac"
+        }.get(target_format, "aac"),
+    ]
+    
+    if target_format != "wav":
+        ffmpeg_command.extend(["-b:a", "192k"])
+        
+    ffmpeg_command.extend([
+        "-f", {
+            "aac": "mp4",
+            "mp3": "mp3",
+            "wav": "wav", 
+            "opus": "ogg",
+            "flac": "flac"
+        }.get(target_format, target_format),
+        "-y",
+        converted_path
+    ])
+    
+    try:
+        subprocess.run(ffmpeg_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Clean up original file
+        Path(input_path).unlink(missing_ok=True)
+        return converted_path
+    except subprocess.CalledProcessError as e:
+        # Clean up files on error
+        Path(converted_path).unlink(missing_ok=True)
+        Path(input_path).unlink(missing_ok=True)
+        raise RuntimeError(f"FFmpeg conversion failed: {e}")
+
+# Main interface functions (backwards compatible)
+async def _generate_audio_stream(text, voice, speed, backend=None):
+    """Generate streaming TTS audio using specified backend."""
+    backend = backend or DEFAULT_BACKEND
+    
+    if backend == 'edgetts':
+        async for chunk in _generate_audio_stream_edgetts(text, voice, speed):
+            yield chunk
+    else:
+        # For now, only edge-tts supports streaming
+        raise RuntimeError(f"Streaming not supported for backend: {backend}")
+
+def generate_speech_stream(text, voice, speed=1.0, backend=None):
+    """Generate streaming speech audio (synchronous wrapper)."""
+    return asyncio.run(_generate_audio_stream(text, voice, speed, backend))
+
+async def _generate_audio(text, voice, response_format, speed, backend=None):
+    """Generate TTS audio using specified backend."""
+    backend = backend or DEFAULT_BACKEND
+    
+    if backend == 'edgetts':
+        return await _generate_audio_edgetts(text, voice, response_format, speed)
+    elif backend == 'azuretts':
+        return await _generate_audio_azuretts(text, voice, response_format, speed)
+    elif backend == 'gemini':
+        return await _generate_audio_gemini(text, voice, response_format, speed)
+    else:
+        raise RuntimeError(f"Unknown TTS backend: {backend}")
+
+def generate_speech(text, voice, response_format, speed=1.0, backend=None):
+    """Generate speech audio (synchronous wrapper)."""
+    return asyncio.run(_generate_audio(text, voice, response_format, speed, backend))
 
 def get_models():
     return model_data
