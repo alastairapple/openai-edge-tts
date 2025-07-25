@@ -1,4 +1,4 @@
-# OpenAI-Compatible Edge-TTS API 🗣️
+# OpenAI-Compatible Multi-TTS API 🗣️
 
 ![GitHub stars](https://img.shields.io/github/stars/travisvn/openai-edge-tts?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/travisvn/openai-edge-tts?style=social)
@@ -8,7 +8,20 @@
 [![Discord](https://img.shields.io/badge/Discord-Voice_AI_%26_TTS_Tools-blue?logo=discord&logoColor=white)](https://discord.gg/GkFbBCBqJ6)
 [![LinkedIn](https://img.shields.io/badge/Connect_on_LinkedIn-%230077B5.svg?logo=linkedin&logoColor=white)](https://linkedin.com/in/travisvannimwegen)
 
-This project provides a local, OpenAI-compatible text-to-speech (TTS) API using `edge-tts`. It emulates the OpenAI TTS endpoint (`/v1/audio/speech`), enabling users to generate speech from text with various voice options and playback speeds, just like the OpenAI API.
+This project provides a local, OpenAI-compatible text-to-speech (TTS) API supporting **multiple TTS services**. It emulates the OpenAI TTS endpoint (`/v1/audio/speech`), enabling users to generate speech from text with various voice options and playback speeds across different TTS providers.
+
+## 🚀 NEW: Multi-TTS Service Support
+
+Now supports **5 different TTS services**:
+- **Edge TTS** (Microsoft) - Free, no API key required ✨
+- **Azure Cognitive Services TTS** - Premium Microsoft TTS
+- **Google Cloud Text-to-Speech** - Google's neural voices  
+- **APIpie TTS** - OpenAI-compatible APIs (including real OpenAI TTS)
+- **Amazon Polly** - AWS neural text-to-speech
+
+Switch between services using the `tts_service` parameter or use the default Edge TTS for backward compatibility.
+
+**📖 [Complete Multi-TTS Guide](MULTI_TTS_GUIDE.md)**
 
 `edge-tts` uses Microsoft Edge's online text-to-speech service, so it is completely free.
 
@@ -19,11 +32,15 @@ This project provides a local, OpenAI-compatible text-to-speech (TTS) API using 
 ## Features
 
 - **OpenAI-Compatible Endpoint**: `/v1/audio/speech` with similar request structure and behavior.
+- **Multiple TTS Services**: Choose from Edge TTS, Azure TTS, Google Cloud TTS, APIpie TTS, and Amazon Polly.
+- **Service Selection**: Use the `tts_service` parameter to specify which TTS service to use.
 - **SSE Streaming Support**: Real-time audio streaming via Server-Sent Events when `stream_format: "sse"` is specified.
-- **Supported Voices**: Maps OpenAI voices (alloy, echo, fable, onyx, nova, shimmer) to `edge-tts` equivalents.
+- **Supported Voices**: Maps OpenAI voices (alloy, echo, fable, onyx, nova, shimmer) to service-specific equivalents.
 - **Flexible Formats**: Supports multiple audio formats (mp3, opus, aac, flac, wav, pcm).
 - **Adjustable Speed**: Option to modify playback speed (0.25x to 4.0x).
-- **Optional Direct Edge-TTS Voice Selection**: Use either OpenAI voice mappings or specify [any edge-tts voice](https://tts.travisvn.com) directly.
+- **Service Management**: New `/v1/services` endpoint to check service availability and configuration.
+- **Automatic Fallback**: Falls back to Edge TTS if other services are unavailable.
+- **Optional Direct Voice Selection**: Use either OpenAI voice mappings or specify service-specific voices directly.
 
 ## ⚡️ Quick start
 
@@ -33,7 +50,31 @@ The simplest way to get started without having to configure anything is to run t
 docker run -d -p 5050:5050 travisvn/openai-edge-tts:latest
 ```
 
-This will run the service at port 5050 with all the default configs
+This will run the service at port 5050 with Edge TTS as the default service.
+
+### Using Different TTS Services
+
+To use a specific TTS service, add the `tts_service` parameter to your requests:
+
+```bash
+# Using Edge TTS (default, free)
+curl -X POST http://localhost:5050/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key_here" \
+  -d '{"input": "Hello world", "voice": "alloy", "tts_service": "edgetts"}'
+
+# Using Azure TTS (requires AZURE_SPEECH_KEY)
+curl -X POST http://localhost:5050/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key_here" \
+  -d '{"input": "Hello world", "voice": "alloy", "tts_service": "azuretts"}'
+
+# Check available services
+curl -X GET http://localhost:5050/v1/services \
+  -H "Authorization: Bearer your_api_key_here"
+```
+
+**📖 [See the complete Multi-TTS Guide](MULTI_TTS_GUIDE.md) for detailed configuration and usage examples.**
 
 _(Docker required, obviously)_
 
