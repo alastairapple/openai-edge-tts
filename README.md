@@ -8,9 +8,13 @@
 [![Discord](https://img.shields.io/badge/Discord-Voice_AI_%26_TTS_Tools-blue?logo=discord&logoColor=white)](https://discord.gg/GkFbBCBqJ6)
 [![LinkedIn](https://img.shields.io/badge/Connect_on_LinkedIn-%230077B5.svg?logo=linkedin&logoColor=white)](https://linkedin.com/in/travisvannimwegen)
 
-This project provides a local, OpenAI-compatible text-to-speech (TTS) API using `edge-tts`. It emulates the OpenAI TTS endpoint (`/v1/audio/speech`), enabling users to generate speech from text with various voice options and playback speeds, just like the OpenAI API.
+This project provides a local, OpenAI-compatible text-to-speech (TTS) API with support for multiple TTS backends. It emulates the OpenAI TTS endpoint (`/v1/audio/speech`), enabling users to generate speech from text with various voice options and playback speeds, just like the OpenAI API.
 
-`edge-tts` uses Microsoft Edge's online text-to-speech service, so it is completely free.
+## 🎵 Supported TTS Backends
+
+- **EdgeTTS** (default) - Microsoft Edge's free online text-to-speech service
+- **Azure TTS** - Azure Cognitive Services Speech (requires subscription)  
+- **Gemini TTS** - Google Gemini audio generation (requires API key)
 
 [View this project on Docker Hub](https://hub.docker.com/r/travisvn/openai-edge-tts)
 
@@ -19,11 +23,12 @@ This project provides a local, OpenAI-compatible text-to-speech (TTS) API using 
 ## Features
 
 - **OpenAI-Compatible Endpoint**: `/v1/audio/speech` with similar request structure and behavior.
+- **Multiple TTS Backends**: Choose between EdgeTTS (free), Azure TTS, or Gemini TTS.
 - **SSE Streaming Support**: Real-time audio streaming via Server-Sent Events when `stream_format: "sse"` is specified.
-- **Supported Voices**: Maps OpenAI voices (alloy, echo, fable, onyx, nova, shimmer) to `edge-tts` equivalents.
+- **Supported Voices**: Maps OpenAI voices (alloy, echo, fable, onyx, nova, shimmer) to backend-specific equivalents.
 - **Flexible Formats**: Supports multiple audio formats (mp3, opus, aac, flac, wav, pcm).
 - **Adjustable Speed**: Option to modify playback speed (0.25x to 4.0x).
-- **Optional Direct Edge-TTS Voice Selection**: Use either OpenAI voice mappings or specify [any edge-tts voice](https://tts.travisvn.com) directly.
+- **Optional Direct Voice Selection**: Use either OpenAI voice mappings or specify backend-specific voices directly.
 
 ## ⚡️ Quick start
 
@@ -56,13 +61,14 @@ cd openai-edge-tts
 
 2. **Environment Variables**: Create a `.env` file in the root directory with the following variables:
 
-```
+```env
 API_KEY=your_api_key_here
 PORT=5050
 
 DEFAULT_VOICE=en-US-AvaNeural
 DEFAULT_RESPONSE_FORMAT=mp3
 DEFAULT_SPEED=1.0
+DEFAULT_BACKEND=edgetts
 
 DEFAULT_LANGUAGE=en-US
 
@@ -70,6 +76,11 @@ REQUIRE_API_KEY=True
 REMOVE_FILTER=False
 EXPAND_API=True
 DETAILED_ERROR_LOGGING=True
+
+# Backend-specific settings (optional)
+AZURE_SPEECH_KEY=your_azure_key_here
+AZURE_SPEECH_REGION=eastus
+GEMINI_API_KEY=your_gemini_key_here
 ```
 
 Or, copy the default `.env.example` with the following:
@@ -235,8 +246,50 @@ Generates audio from the input text. Available parameters:
 - **response_format** (string): Audio format. Options: `mp3`, `opus`, `aac`, `flac`, `wav`, `pcm` (default: `mp3`).
 - **speed** (number): Playback speed (0.25 to 4.0). Default is `1.0`.
 - **stream_format** (string): Response format. Options: `"audio"` (raw audio data, default) or `"sse"` (Server-Sent Events streaming with JSON events).
+- **backend** (string): TTS backend to use. Options: `"edgetts"` (default), `"azuretts"`, `"gemini"`.
 
 **Note:** The API is fully compatible with OpenAI's TTS API specification. The `instructions` parameter (for fine-tuning voice characteristics) is not currently supported, but all other parameters work identically to OpenAI's implementation.
+
+#### Multi-Backend Usage
+
+You can specify which TTS backend to use with the `backend` parameter:
+
+```bash
+# EdgeTTS (default, free)
+curl -X POST http://localhost:5050/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key_here" \
+  -d '{
+    "input": "Hello from EdgeTTS!",
+    "voice": "alloy",
+    "backend": "edgetts"
+  }' \
+  --output speech_edge.mp3
+
+# Azure TTS (requires Azure subscription)
+curl -X POST http://localhost:5050/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key_here" \
+  -d '{
+    "input": "Hello from Azure TTS!",
+    "voice": "alloy", 
+    "backend": "azuretts"
+  }' \
+  --output speech_azure.mp3
+
+# Gemini TTS (requires Google API key)
+curl -X POST http://localhost:5050/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key_here" \
+  -d '{
+    "input": "Hello from Gemini TTS!",
+    "voice": "nova",
+    "backend": "gemini"
+  }' \
+  --output speech_gemini.mp3
+```
+
+📚 **[View detailed backend usage guide →](BACKEND_USAGE.md)**
 
 #### Standard Audio Generation
 
