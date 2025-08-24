@@ -3,3 +3,7 @@ gevent
 python-dotenv
 edge-tts
 emoji
+aiohttp
+azure-cognitiveservices-speech
+google-cloud-texttospeech
+boto3

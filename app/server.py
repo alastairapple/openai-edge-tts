@@ -7,10 +7,11 @@ import os
 import traceback
 import json
 import base64
+import asyncio
 
 from config import DEFAULT_CONFIGS
 from handle_text import prepare_tts_input_with_context
-from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted
+from multi_tts_handler import MultiTTSHandler
 from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING
 
 app = Flask(__name__)
@@ -26,14 +27,17 @@ DEFAULT_SPEED = float(os.getenv('DEFAULT_SPEED', str(DEFAULT_CONFIGS["DEFAULT_SP
 REMOVE_FILTER = getenv_bool('REMOVE_FILTER', DEFAULT_CONFIGS["REMOVE_FILTER"])
 EXPAND_API = getenv_bool('EXPAND_API', DEFAULT_CONFIGS["EXPAND_API"])
 
+# Initialize the multi-TTS handler
+tts_handler = MultiTTSHandler()
+
 # DEFAULT_MODEL = os.getenv('DEFAULT_MODEL', 'tts-1')
 
 # Currently in "beta" — needs more extensive testing where drop-in replacement warranted
-def generate_sse_audio_stream(text, voice, speed):
+async def generate_sse_audio_stream(text, voice, speed, tts_service=None):
     """Generator function for SSE streaming with JSON events."""
     try:
         # Generate streaming audio chunks and convert to SSE format
-        for chunk in generate_speech_stream(text, voice, speed):
+        async for chunk in tts_handler.generate_speech_stream(text, voice, speed, tts_service):
             # Base64 encode the audio chunk
             encoded_audio = base64.b64encode(chunk).decode('utf-8')
             
@@ -51,7 +55,7 @@ def generate_sse_audio_stream(text, voice, speed):
             "type": "speech.audio.done",
             "usage": {
                 "input_tokens": len(text.split()),  # Rough estimate
-                "output_tokens": 0,  # Edge TTS doesn't provide this
+                "output_tokens": 0,  # TTS doesn't provide this
                 "total_tokens": len(text.split())
             }
         }
@@ -86,6 +90,9 @@ def text_to_speech():
         response_format = data.get('response_format', DEFAULT_RESPONSE_FORMAT)
         speed = float(data.get('speed', DEFAULT_SPEED))
         
+        # New parameter: tts_service to specify which service to use
+        tts_service = data.get('tts_service', None)  # None means use default
+        
         # Check stream format - only "sse" triggers streaming
         stream_format = data.get('stream_format', 'audio')  # 'audio' (default) or 'sse'
         
@@ -94,8 +101,55 @@ def text_to_speech():
         if stream_format == 'sse':
             # Return SSE streaming response with JSON events
             def generate_sse():
-                for event in generate_sse_audio_stream(text, voice, speed):
-                    yield event
+                try:
+                    # Run the async streaming function synchronously
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    async def async_stream():
+                        async for chunk in tts_handler.generate_speech_stream(text, voice, speed, tts_service):
+                            # Base64 encode the audio chunk
+                            encoded_audio = base64.b64encode(chunk).decode('utf-8')
+                            
+                            # Create SSE event for audio delta
+                            event_data = {
+                                "type": "speech.audio.delta",
+                                "audio": encoded_audio
+                            }
+                            
+                            # Format as SSE event
+                            yield f"data: {json.dumps(event_data)}\n\n"
+                        
+                        # Send completion event
+                        completion_event = {
+                            "type": "speech.audio.done",
+                            "usage": {
+                                "input_tokens": len(text.split()),  # Rough estimate
+                                "output_tokens": 0,  # TTS doesn't provide this
+                                "total_tokens": len(text.split())
+                            }
+                        }
+                        yield f"data: {json.dumps(completion_event)}\n\n"
+                    
+                    # Convert async generator to sync
+                    async_gen = async_stream()
+                    while True:
+                        try:
+                            event = loop.run_until_complete(async_gen.__anext__())
+                            yield event
+                        except StopAsyncIteration:
+                            break
+                    
+                    loop.close()
+                    
+                except Exception as e:
+                    print(f"Error during SSE streaming: {e}")
+                    # Send error event
+                    error_event = {
+                        "type": "error",
+                        "error": str(e)
+                    }
+                    yield f"data: {json.dumps(error_event)}\n\n"
             
             return Response(
                 generate_sse(),
@@ -109,7 +163,7 @@ def text_to_speech():
             )
         else:
             # Return raw audio data (like OpenAI) - can be piped to ffplay
-            output_file_path = generate_speech(text, voice, response_format, speed)
+            output_file_path = asyncio.run(tts_handler.generate_speech(text, voice, response_format, speed, tts_service))
             
             # Read the file and return raw audio data
             with open(output_file_path, 'rb') as audio_file:
@@ -144,36 +198,78 @@ def text_to_speech():
 @app.route('/v1/audio/models', methods=['GET', 'POST'])
 @app.route('/audio/models', methods=['GET', 'POST'])
 def list_models():
-    return jsonify({"models": get_models_formatted()})
+    # Check if a specific service is requested
+    service_name = request.args.get('service') or (request.json or {}).get('service') if request.json else None
+    return jsonify({"models": tts_handler.get_models_formatted(service_name)})
 
 # OpenAI endpoint format
 @app.route('/v1/audio/voices', methods=['GET', 'POST'])
 @app.route('/audio/voices', methods=['GET', 'POST'])
 def list_voices_formatted():
-    return jsonify({"voices": get_voices_formatted()})
+    # Check if a specific service is requested
+    service_name = request.args.get('service') or (request.json or {}).get('service') if request.json else None
+    return jsonify({"voices": tts_handler.get_voices_formatted(service_name)})
 
 @app.route('/v1/voices', methods=['GET', 'POST'])
 @app.route('/voices', methods=['GET', 'POST'])
 @require_api_key
 def list_voices():
     specific_language = None
+    service_name = None
 
     data = request.args if request.method == 'GET' else request.json
-    if data and ('language' in data or 'locale' in data):
-        specific_language = data.get('language') if 'language' in data else data.get('locale')
+    if data:
+        if 'language' in data or 'locale' in data:
+            specific_language = data.get('language') if 'language' in data else data.get('locale')
+        if 'service' in data:
+            service_name = data.get('service')
 
-    return jsonify({"voices": get_voices(specific_language)})
+    voices = asyncio.run(tts_handler.get_voices(specific_language, service_name))
+    return jsonify({"voices": voices})
 
 @app.route('/v1/voices/all', methods=['GET', 'POST'])
 @app.route('/voices/all', methods=['GET', 'POST'])
 @require_api_key
 def list_all_voices():
-    return jsonify({"voices": get_voices('all')})
+    service_name = None
+    data = request.args if request.method == 'GET' else request.json
+    if data and 'service' in data:
+        service_name = data.get('service')
+    
+    voices = asyncio.run(tts_handler.get_voices('all', service_name))
+    return jsonify({"voices": voices})
 
 """
 Support for ElevenLabs and Azure AI Speech
     (currently in beta)
 """
+
+# New endpoints for service management
+@app.route('/v1/services', methods=['GET'])
+@app.route('/services', methods=['GET'])
+@require_api_key
+def list_services():
+    """List all available TTS services and their status."""
+    return jsonify({
+        "services": tts_handler.get_available_services(),
+        "service_info": tts_handler.get_service_info()
+    })
+
+@app.route('/v1/services/<service_name>/voices', methods=['GET', 'POST'])
+@app.route('/services/<service_name>/voices', methods=['GET', 'POST'])
+@require_api_key
+def list_service_voices(service_name):
+    """List voices for a specific service."""
+    specific_language = None
+    data = request.args if request.method == 'GET' else request.json
+    if data and ('language' in data or 'locale' in data):
+        specific_language = data.get('language') if 'language' in data else data.get('locale')
+    
+    try:
+        voices = asyncio.run(tts_handler.get_voices(specific_language, service_name))
+        return jsonify({"voices": voices, "service": service_name})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 # http://localhost:5050/elevenlabs/v1/text-to-speech
 # http://localhost:5050/elevenlabs/v1/text-to-speech/en-US-AndrewNeural
@@ -202,9 +298,9 @@ def elevenlabs_tts(voice_id):
     response_format = 'mp3'
     speed = DEFAULT_SPEED  # Optional customization via payload.get('speed', DEFAULT_SPEED)
 
-    # Generate speech using edge-tts
+    # Generate speech using the multi-TTS handler (use Edge TTS for ElevenLabs compatibility)
     try:
-        output_file_path = generate_speech(text, voice, response_format, speed)
+        output_file_path = asyncio.run(tts_handler.generate_speech(text, voice, response_format, speed, 'edgetts'))
     except Exception as e:
         return jsonify({"error": f"TTS generation failed: {str(e)}"}), 500
 
@@ -241,20 +337,26 @@ def azure_tts():
     if not REMOVE_FILTER:
         text = prepare_tts_input_with_context(text)
 
-    # Generate speech using edge-tts
+    # Generate speech using the multi-TTS handler (use Azure TTS service if available, fall back to Edge TTS)
     try:
-        output_file_path = generate_speech(text, voice, response_format, speed)
+        output_file_path = asyncio.run(tts_handler.generate_speech(text, voice, response_format, speed, 'azuretts'))
     except Exception as e:
         return jsonify({"error": f"TTS generation failed: {str(e)}"}), 500
 
     # Return the generated audio file
     return send_file(output_file_path, mimetype="audio/mpeg", as_attachment=True, download_name="speech.mp3")
 
-print(f" Edge TTS (Free Azure TTS) Replacement for OpenAI's TTS API")
+print(f" Multi-TTS Service API (OpenAI Compatible)")
 print(f" ")
-print(f" * Serving OpenAI Edge TTS")
+print(f" * Serving Multiple TTS Services:")
+print(f"   - Edge TTS (Microsoft)")
+print(f"   - Azure Cognitive Services TTS")
+print(f"   - Google Cloud Text-to-Speech")
+print(f"   - OpenAI-compatible APIs (APIpie)")
+print(f"   - Amazon Polly")
 print(f" * Server running on http://localhost:{PORT}")
 print(f" * TTS Endpoint: http://localhost:{PORT}/v1/audio/speech")
+print(f" * Services Endpoint: http://localhost:{PORT}/v1/services")
 print(f" ")
 
 if __name__ == '__main__':
